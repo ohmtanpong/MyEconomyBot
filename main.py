@@ -24,110 +24,113 @@ def send_line_push(message):
         'messages': [{'type': 'text', 'text': message}]
     }
     try:
-        requests.post(url, headers=headers, data=json.dumps(data))
+        response = requests.post(url, headers=headers, data=json.dumps(data))
+        if response.status_code != 200:
+            print(f"LINE Error: {response.text}")
     except Exception as e:
-        print(f"Line Error: {e}")
+        print(f"Line Connection Error: {e}")
 
 # 3. เลือกโมเดล
-def select_best_model():
-    print("🔍 Auto-detecting models...")
-    try:
-        available = []
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                available.append(m.name)
-        
-        if not available: return None, "No models found."
-        
-        # เน้นโมเดลที่รองรับ Search Tool ได้ดี
-        preferred = [
-            'models/gemini-1.5-pro', # ตัวนี้เก่งสุดเรื่องค้นหา
-            'models/gemini-1.5-pro-latest',
-            'models/gemini-1.5-flash',
-            'models/gemini-pro'
-        ]
-        
-        for p in preferred:
-            if p in available:
-                print(f"✅ Selected Model: {p}")
-                return p, None
-        
-        return available[0], None
-
-    except Exception as e:
-        return None, str(e)
-
-# 4. สั่งงาน Gemini (โหมดแม่นยำพิเศษ)
-def get_economy_data():
-    model_name, error = select_best_model()
-    if error: return f"System Error: {error}"
-
-    # --- ส่วนสำคัญ 1: เปิดใช้ Google Search Tool ---
-    # ทำให้โมเดลค้นหาข้อมูลล่าสุดจาก Google ได้จริง
-    tools = [
-        {"google_search": {}} 
+def select_model():
+    # ลำดับการเลือก: 1.5 Pro -> 1.5 Flash -> Pro ธรรมดา
+    # *หมายเหตุ: Pro ธรรมดา ไม่รองรับ Search*
+    preferred = [
+        'models/gemini-1.5-pro',
+        'models/gemini-1.5-pro-latest',
+        'models/gemini-1.5-flash',
+        'models/gemini-1.5-flash-latest',
+        'models/gemini-pro'
     ]
     
-    # สร้างโมเดลพร้อมเครื่องมือ
-    model = genai.GenerativeModel(model_name, tools=tools)
+    try:
+        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+    except:
+        available_models = []
+
+    # ถ้าหาไม่เจอเลย ให้ใช้ตัว Fallback มาตรฐาน
+    if not available_models:
+        return 'models/gemini-pro'
+
+    for p in preferred:
+        if p in available_models:
+            print(f"✅ Found Model: {p}")
+            return p
     
+    # ถ้าไม่เจอตัวที่ชอบเลย เอาตัวแรกที่มี
+    return available_models[0]
+
+# 4. สั่งงาน Gemini (ระบบ Hybrid: Search -> Fallback)
+def get_economy_data():
+    model_name = select_model()
     current_date = datetime.now().strftime("%d %B %Y")
     
-    # --- ส่วนสำคัญ 2: ล็อคความนิ่ง (Temperature = 0) ---
-    generation_config = genai.types.GenerationConfig(
-        temperature=0.0  # 0.0 = แม่นยำที่สุด ห้ามสุ่ม ห้ามมั่ว
-    )
-
-    prompt = f"""
+    # Prompt หลัก
+    base_prompt = f"""
     Current Date: {current_date}
     Role: Financial Data Analyst.
+    Task: Summarize LATEST OFFICIAL economic data as of TODAY.
+    Countries: 🇺🇸US, 🇨🇳China, 🇪🇺EU, 🇯🇵Japan, 🇮🇳India, 🇰🇷Korea, 🇻🇳Vietnam, 🇹🇭Thailand.
     
-    Task: Use Google Search to find the LATEST OFFICIAL RELEASED economic data as of TODAY.
-    Countries: 🇺🇸US, 🇨🇳China, 🇪🇺Eurozone, 🇯🇵Japan, 🇮🇳India, 🇰🇷Korea, 🇻🇳Vietnam, 🇹🇭Thailand.
-    
-    Data Points Required:
+    Required Data:
     1. GDP Growth (YoY)
     2. Inflation Rate (CPI YoY)
-    3. Central Bank Interest Rate
-    4. Manufacturing PMI
-    5. Main Stock Index YTD Return (e.g., S&P500, SET, VN30, NIKKEI)
+    3. Policy Interest Rate
+    4. PMI (Manufacturing)
+    5. Stock Index YTD Return (e.g. S&P500, SET)
     
-    Format Definitions:
-    - [Prev]: The data from the period immediately BEFORE the latest release.
-    - [Actual]: The MOST RECENTLY RELEASED official number.
-    - [Est]: The Consensus Forecast for the NEXT release (if found, else "-").
-    
-    Output Format (Single consolidated message in THAI Language):
+    Format (Single consolidated message in THAI):
     [Flag] [Country Name in Thai]
     • GDP: [Prev]% ➡ [Actual]% (Est [Est]%)
     • CPI: [Prev]% ➡ [Actual]% (Est [Est]%)
     • Rate: [Prev]% ➡ [Actual]% (Est [Est]%)
     • PMI: [Prev] ➡ [Actual] [Emoji]
-    • Stock YTD: [Index Name] [Return]%
-    
-    PMI Emoji: 🟢(>50), 🔴(<50), ⚪(=50)
-    
-    Strict Rules:
-    1. ACCURACY IS PARAMOUNT. Use search results. Do not hallucinate.
-    2. If "Forecast/Est" is not found in search results, stick to "-" (Dash).
-    3. "Actual" must be the latest announced figure (e.g., if today is Dec 15, CPI might be from Nov).
-    4. Provide a brief "💡 Analyst View" at the end.
+    • Stock YTD: [Index] [Return]%
+
+    Rules:
+    - Use 🟢(>50), 🔴(<50), ⚪(=50) for PMI.
+    - If forecast is missing, use "-".
+    - "Actual" must be the LATEST released number.
+    - Add "💡 Analyst View" at the bottom.
     """
-    
+
+    # --- ความพยายามที่ 1: ใช้ Google Search (เฉพาะรุ่น 1.5) ---
+    if "1.5" in model_name:
+        try:
+            print(f"🚀 Attempting Search Mode with {model_name}...")
+            tools = [{"google_search": {}}]
+            model = genai.GenerativeModel(model_name, tools=tools)
+            
+            # สั่งให้ค้นหาแบบเจาะจง
+            search_prompt = base_prompt + "\nIMPORTANT: Use Google Search to verify EACH number."
+            
+            response = model.generate_content(
+                search_prompt,
+                generation_config=genai.types.GenerationConfig(temperature=0.0) # ล็อคความนิ่ง
+            )
+            return response.text
+        except Exception as e:
+            print(f"⚠️ Search Mode Failed: {e}")
+            print("🔄 Switching to Standard Mode...")
+
+    # --- ความพยายามที่ 2: โหมดปกติ (ถ้า Search พัง หรือเป็นรุ่นเก่า) ---
     try:
-        # ส่งคำสั่งพร้อม Config
-        response = model.generate_content(prompt, generation_config=generation_config)
+        print(f"🔹 Running Standard Mode with {model_name}...")
+        model = genai.GenerativeModel(model_name) # ไม่ใส่ tools
+        response = model.generate_content(
+            base_prompt,
+            generation_config=genai.types.GenerationConfig(temperature=0.0)
+        )
         return response.text
     except Exception as e:
-        return f"Generate Error: {str(e)}"
+        return f"❌ Fatal Error: {str(e)}"
 
 # 5. เริ่มทำงาน
 if __name__ == "__main__":
     print("Process Started...")
     content = get_economy_data()
     
-    header = f"📊 สรุปเศรษฐกิจโลก (Search Mode)\n📅 ข้อมูล ณ {datetime.now().strftime('%d/%m/%Y')}\n{'-'*20}\n"
-    footer = f"\n{'-'*20}\n⚠️ ข้อมูลจากการค้นหา Google Search โดย AI"
+    header = f"📊 สรุปเศรษฐกิจโลก\n📅 ข้อมูล ณ {datetime.now().strftime('%d/%m/%Y')}\n{'-'*20}\n"
+    footer = f"\n{'-'*20}\n⚠️ AI Generated: โปรดตรวจสอบก่อนลงทุน"
     
     send_line_push(header + content + footer)
     print("Done!")
