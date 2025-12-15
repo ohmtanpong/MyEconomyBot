@@ -11,7 +11,7 @@ LINE_USER_ID = os.environ["LINE_USER_ID"]
 
 genai.configure(api_key=GEMINI_API_KEY)
 
-# 2. ฟังก์ชันส่งไลน์
+# 2. ฟังก์ชันส่งไลน์ (ส่งทีเดียว ข้อความเดียว)
 def send_line_push(message):
     url = 'https://api.line.me/v2/bot/message/push'
     headers = {
@@ -20,90 +20,96 @@ def send_line_push(message):
     }
     data = {
         'to': LINE_USER_ID,
-        'messages': [{'type': 'text', 'text': message}]
+        'messages': [{'type': 'text', 'text': message}] # ส่งเป็นก้อนเดียว
     }
     try:
         response = requests.post(url, headers=headers, data=json.dumps(data))
-        if response.status_code != 200:
-            print(f"LINE Error: {response.status_code} {response.text}")
+        print(f"LINE Response: {response.status_code}")
     except Exception as e:
         print(f"Error sending LINE: {e}")
 
-# 3. สั่งงาน Gemini
-def get_economy_summary():
-    # ระบบ Auto-Detect เลือกโมเดลที่ฉลาดที่สุดก่อน
-    valid_model = None
+# 3. ระบบค้นหาโมเดลอัตโนมัติ (แก้ปัญหา 404)
+def select_best_model():
+    print("🔍 Auto-detecting available models...")
     try:
-        # ลองหา Pro หรือ Flash 1.5 ก่อน
+        available_models = []
         for m in genai.list_models():
             if 'generateContent' in m.supported_generation_methods:
-                if 'gemini-1.5-pro' in m.name:
-                    valid_model = m.name; break
-        # ถ้าไม่มี เอา Flash
-        if not valid_model:
-            for m in genai.list_models():
-                if 'generateContent' in m.supported_generation_methods:
-                    if 'gemini-1.5-flash' in m.name:
-                        valid_model = m.name; break
-        # ถ้าไม่มีจริงๆ เอาอะไรก็ได้
-        if not valid_model:
-            valid_model = 'gemini-pro'
-    except:
-        valid_model = 'gemini-pro'
+                available_models.append(m.name)
+        
+        if not available_models:
+            return None, "No models found."
 
-    print(f"Using Model: {valid_model}")
-    model = genai.GenerativeModel(valid_model)
-    
+        # ลำดับความสำคัญ: Flash -> Pro -> อะไรก็ได้
+        preferred = [
+            'models/gemini-1.5-flash',
+            'models/gemini-1.5-flash-latest',
+            'models/gemini-1.5-pro',
+            'models/gemini-pro'
+        ]
+        
+        # เลือกตัวที่ดีที่สุดที่มีในบัญชี
+        for p in preferred:
+            if p in available_models:
+                print(f"✅ Selected: {p}")
+                return p, None
+        
+        # ถ้าไม่เจอตัวที่ชอบ เอาตัวแรกที่มีเลย
+        print(f"✅ Selected (Fallback): {available_models[0]}")
+        return available_models[0], None
+
+    except Exception as e:
+        return None, str(e)
+
+# 4. สั่งงาน Gemini
+def get_economy_data():
+    model_name, error = select_best_model()
+    if error:
+        return f"❌ System Error: {error}"
+
+    model = genai.GenerativeModel(model_name)
     current_date = datetime.now().strftime("%B %Y")
     
-    # --- Prompt ที่ปรับปรุงใหม่ (Strict Data & Formatting) ---
     prompt = f"""
-    Act as a professional economist. Summarize the LATEST OFFICIAL economic indicators for:
-    🇺🇸USA, 🇨🇳China, 🇪🇺Eurozone, 🇯🇵Japan, 🇮🇳India, 🇰🇷South Korea, 🇻🇳Vietnam, 🇹🇭Thailand.
+    Task: Summarize LATEST OFFICIAL economic data for {current_date}.
+    Countries: 🇺🇸US, 🇨🇳China, 🇪🇺EU, 🇯🇵Japan, 🇮🇳India, 🇰🇷Korea, 🇻🇳Vietnam, 🇹🇭Thailand.
     
-    Current Date: {current_date}
+    Output Format:
+    Create a single consolidated list in THAI language.
+    For each country, show these 5 lines (Compact style):
+    [Flag] [Country Name]
+    • GDP: [Prev]% ➡ [Actual]% (Est [Fcst]%)
+    • CPI: [Prev]% ➡ [Actual]% (Est [Fcst]%)
+    • Rate: [Prev]% ➡ [Actual]% (Est [Fcst]%)
+    • PMI: [Prev] ➡ [Actual] [Status_Emoji]
+    • Stock YTD: [Index] [Return]%
     
-    Please present the data in this EXACT format for each country:
-    
-    [Flag Emoji] [Country Name]
-    • GDP: [Prev]% ➡ [Current]% (Est [Forecast]%)
-    • CPI: [Prev]% ➡ [Current]% (Est [Forecast]%)
-    • Rate: [Prev]% ➡ [Current]% (Est [Forecast]%)
-    • PMI: [Prev] ➡ [Current] ([Status Emoji])
-    • YTD Stock: [Index Name] [+/-Return]%
-    
-    Indicators Key:
-    - GDP: GDP Growth Rate (YoY)
-    - CPI: Inflation Rate (YoY)
-    - Rate: Central Bank Interest Rate
-    - PMI: Manufacturing PMI (Use 🟢 for >50, 🔴 for <50, ⚪ for 50)
-    - YTD Stock: Year-to-Date return of the main index.
+    Status Emoji for PMI: 🟢(>50), 🔴(<50), ⚪(=50)
     
     Rules:
-    1. Only use OFFICIAL announced numbers. If "Forecast" is unavailable, use "-".
-    2. Comparison: Show Previous vs Current to see the trend.
-    3. Keep it clean and readable for a chat app (LINE).
-    4. **Translate everything into THAI Language.**
-    5. Add a "💡 Analyst View" at the very end (1-2 sentences on who looks strongest).
+    1. Compare 3 points: Previous -> Actual (Forecast). If Forecast is missing, use "-".
+    2. Use OFFICIAL data only.
+    3. Keep it strictly compact.
+    4. Analyst View: At the bottom, add 2 sentences on the best market to invest in.
     """
     
     try:
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"เกิดข้อผิดพลาดในการดึงข้อมูล: {str(e)}"
+        return f"❌ Generate Error: {str(e)}"
 
-# 4. เริ่มทำงาน
+# 5. เริ่มทำงาน
 if __name__ == "__main__":
-    print("Generating...")
-    summary = get_economy_summary()
+    print("Generating content...")
+    content = get_economy_data()
     
-    # ส่วนหัวข้อความ
-    header = f"📊 สรุปตัวเลขเศรษฐกิจ (3-Point Data)\n📅 ข้อมูลล่าสุด ณ {datetime.now().strftime('%m/%Y')}\n{'-'*25}\n"
+    # รวมทุกส่วนเป็น String เดียว (ข้อความเดียว)
+    header = f"📊 สรุปเศรษฐกิจโลก (3-Point Data)\n📅 ประจำเดือน {datetime.now().strftime('%m/%Y')}\n{'-'*20}\n"
+    footer = f"\n{'-'*20}\n⚠️ AI Generated: โปรดตรวจสอบก่อนลงทุน"
     
-    # ส่วน Disclaimer (สำคัญมาก เพื่อเตือนเรื่องความแม่นยำ)
-    footer = f"\n{'-'*25}\n⚠️ หมายเหตุ: ข้อมูลสังเคราะห์โดย AI โปรดตรวจสอบแหล่งข้อมูลทางการ (Investing/Bloomberg) อีกครั้งก่อนตัดสินใจลงทุน"
+    full_message = header + content + footer
     
-    # ส่งเข้า LINE
-    send_line_push(header + summary + footer)
+    print("Sending single message to LINE...")
+    send_line_push(full_message)
     print("Done!")
