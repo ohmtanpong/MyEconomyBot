@@ -1,8 +1,8 @@
 import os
 import requests
 import json
+import yfinance as yf  # พระเอกตัวจริงสำหรับหุ้น
 import google.generativeai as genai
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from datetime import datetime
 
 # 1. ตั้งค่า
@@ -12,7 +12,98 @@ LINE_USER_ID = os.environ["LINE_USER_ID"]
 
 genai.configure(api_key=GEMINI_API_KEY)
 
-# 2. ฟังก์ชันส่งไลน์
+# 2. ฟังก์ชันดึงหุ้นของจริง (Real-time 100%)
+def get_real_stock_data():
+    print("📈 Fetching Real Stock Data from Yahoo Finance...")
+    
+    # รหัสหุ้นใน Yahoo Finance
+    tickers = {
+        "🇺🇸 S&P500": "^GSPC",
+        "🇨🇳 Shanghai": "000001.SS",
+        "🇪🇺 Stoxx50": "^STOXX50E",
+        "🇯🇵 Nikkei": "^N225",
+        "🇮🇳 Nifty": "^NSEI",
+        "🇰🇷 KOSPI": "^KS11",
+        "🇻🇳 VN-Index": "^VNINDEX", # บางที Yahoo อาจดึงเวียดนามช้า ถ้า Error จะข้าม
+        "🇹🇭 SET": "^SET.BK"
+    }
+    
+    stock_report = ""
+    current_year = datetime.now().year
+    
+    for country, symbol in tickers.items():
+        try:
+            stock = yf.Ticker(symbol)
+            # ดึงประวัติราคาตั้งแต่ต้นปี
+            hist = stock.history(start=f"{current_year}-01-01")
+            
+            if not hist.empty:
+                start_price = hist.iloc[0]['Close']
+                current_price = hist.iloc[-1]['Close']
+                change_pct = ((current_price - start_price) / start_price) * 100
+                
+                # ใส่เครื่องหมาย + หรือ -
+                sign = "+" if change_pct >= 0 else ""
+                stock_report += f"{country}: {sign}{change_pct:.2f}% (Price: {current_price:,.0f})\n"
+            else:
+                stock_report += f"{country}: N/A (Data Error)\n"
+        except Exception as e:
+            stock_report += f"{country}: N/A\n"
+            
+    return stock_report
+
+# 3. ฟังก์ชัน AI (หาแค่ GDP/CPI/Rates)
+def get_economy_with_ai(stock_text):
+    print("🤖 AI searching for Macro Data...")
+    
+    # พยายามใช้ 1.5 Flash (เร็วและรองรับ Search)
+    model = genai.GenerativeModel('models/gemini-1.5-flash') 
+    
+    current_date = datetime.now().strftime("%d %B %Y")
+    
+    prompt = f"""
+    Current Date: {current_date}
+    
+    I have already fetched the Real-Time Stock Market Data:
+    {stock_text}
+    
+    YOUR TASK:
+    Use Google Search to find the LATEST OFFICIAL Macro Economic Data for:
+    🇺🇸US, 🇨🇳China, 🇪🇺Eurozone, 🇯🇵Japan, 🇮🇳India, 🇰🇷Korea, 🇻🇳Vietnam, 🇹🇭Thailand.
+    
+    Find specific latest numbers for:
+    1. GDP Growth Rate (YoY) - Latest announced quarter
+    2. Inflation Rate (CPI YoY) - Latest announced month
+    3. Central Bank Interest Rate - Current level
+    4. Manufacturing PMI - Latest month
+    
+    OUTPUT FORMAT (Combine my Stock Data with your found Macro Data):
+    Create a consolidated summary in THAI Language.
+    
+    [Flag] [Country Name]
+    • GDP: [Actual]% (Ref: [Month/Quarter])
+    • CPI: [Actual]%
+    • Rate: [Actual]%
+    • PMI: [Actual] [Emoji]
+    • YTD Stock: [Insert valid data from my list above]
+    
+    Rules:
+    - PMI Emoji: 🟢(>50), 🔴(<50)
+    - **ACCURACY IS CRITICAL**. If you cannot find the official number via search, write "-". DO NOT GUESS.
+    - Do not invent stock numbers, use ONLY what I provided.
+    - Add "💡 Analyst View" at the bottom (2 sentences).
+    """
+    
+    # เปิดโหมด Search
+    tools = [{"google_search": {}}]
+    try:
+        response = model.generate_content(prompt, tools=tools)
+        return response.text
+    except Exception as e:
+        # ถ้า Search พัง ให้ตอบ Error ดีกว่าตอบมั่ว
+        return f"❌ เกิดข้อผิดพลาดในการค้นหาข้อมูล: {str(e)}"
+
+# 4. ส่งไลน์
 def send_line_push(message):
     url = 'https://api.line.me/v2/bot/message/push'
     headers = {
@@ -23,114 +114,19 @@ def send_line_push(message):
         'to': LINE_USER_ID,
         'messages': [{'type': 'text', 'text': message}]
     }
-    try:
-        response = requests.post(url, headers=headers, data=json.dumps(data))
-        if response.status_code != 200:
-            print(f"LINE Error: {response.text}")
-    except Exception as e:
-        print(f"Line Connection Error: {e}")
-
-# 3. เลือกโมเดล
-def select_model():
-    # ลำดับการเลือก: 1.5 Pro -> 1.5 Flash -> Pro ธรรมดา
-    # *หมายเหตุ: Pro ธรรมดา ไม่รองรับ Search*
-    preferred = [
-        'models/gemini-1.5-pro',
-        'models/gemini-1.5-pro-latest',
-        'models/gemini-1.5-flash',
-        'models/gemini-1.5-flash-latest',
-        'models/gemini-pro'
-    ]
-    
-    try:
-        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-    except:
-        available_models = []
-
-    # ถ้าหาไม่เจอเลย ให้ใช้ตัว Fallback มาตรฐาน
-    if not available_models:
-        return 'models/gemini-pro'
-
-    for p in preferred:
-        if p in available_models:
-            print(f"✅ Found Model: {p}")
-            return p
-    
-    # ถ้าไม่เจอตัวที่ชอบเลย เอาตัวแรกที่มี
-    return available_models[0]
-
-# 4. สั่งงาน Gemini (ระบบ Hybrid: Search -> Fallback)
-def get_economy_data():
-    model_name = select_model()
-    current_date = datetime.now().strftime("%d %B %Y")
-    
-    # Prompt หลัก
-    base_prompt = f"""
-    Current Date: {current_date}
-    Role: Financial Data Analyst.
-    Task: Summarize LATEST OFFICIAL economic data as of TODAY.
-    Countries: 🇺🇸US, 🇨🇳China, 🇪🇺EU, 🇯🇵Japan, 🇮🇳India, 🇰🇷Korea, 🇻🇳Vietnam, 🇹🇭Thailand.
-    
-    Required Data:
-    1. GDP Growth (YoY)
-    2. Inflation Rate (CPI YoY)
-    3. Policy Interest Rate
-    4. PMI (Manufacturing)
-    5. Stock Index YTD Return (e.g. S&P500, SET)
-    
-    Format (Single consolidated message in THAI):
-    [Flag] [Country Name in Thai]
-    • GDP: [Prev]% ➡ [Actual]% (Est [Est]%)
-    • CPI: [Prev]% ➡ [Actual]% (Est [Est]%)
-    • Rate: [Prev]% ➡ [Actual]% (Est [Est]%)
-    • PMI: [Prev] ➡ [Actual] [Emoji]
-    • Stock YTD: [Index] [Return]%
-
-    Rules:
-    - Use 🟢(>50), 🔴(<50), ⚪(=50) for PMI.
-    - If forecast is missing, use "-".
-    - "Actual" must be the LATEST released number.
-    - Add "💡 Analyst View" at the bottom.
-    """
-
-    # --- ความพยายามที่ 1: ใช้ Google Search (เฉพาะรุ่น 1.5) ---
-    if "1.5" in model_name:
-        try:
-            print(f"🚀 Attempting Search Mode with {model_name}...")
-            tools = [{"google_search": {}}]
-            model = genai.GenerativeModel(model_name, tools=tools)
-            
-            # สั่งให้ค้นหาแบบเจาะจง
-            search_prompt = base_prompt + "\nIMPORTANT: Use Google Search to verify EACH number."
-            
-            response = model.generate_content(
-                search_prompt,
-                generation_config=genai.types.GenerationConfig(temperature=0.0) # ล็อคความนิ่ง
-            )
-            return response.text
-        except Exception as e:
-            print(f"⚠️ Search Mode Failed: {e}")
-            print("🔄 Switching to Standard Mode...")
-
-    # --- ความพยายามที่ 2: โหมดปกติ (ถ้า Search พัง หรือเป็นรุ่นเก่า) ---
-    try:
-        print(f"🔹 Running Standard Mode with {model_name}...")
-        model = genai.GenerativeModel(model_name) # ไม่ใส่ tools
-        response = model.generate_content(
-            base_prompt,
-            generation_config=genai.types.GenerationConfig(temperature=0.0)
-        )
-        return response.text
-    except Exception as e:
-        return f"❌ Fatal Error: {str(e)}"
+    requests.post(url, headers=headers, data=json.dumps(data))
 
 # 5. เริ่มทำงาน
 if __name__ == "__main__":
-    print("Process Started...")
-    content = get_economy_data()
+    # 1. ดึงหุ้นจริงก่อน
+    real_stock_data = get_real_stock_data()
     
-    header = f"📊 สรุปเศรษฐกิจโลก\n📅 ข้อมูล ณ {datetime.now().strftime('%d/%m/%Y')}\n{'-'*20}\n"
-    footer = f"\n{'-'*20}\n⚠️ AI Generated: โปรดตรวจสอบก่อนลงทุน"
+    # 2. เอาหุ้นไปให้ AI เขียนข่าวเศรษฐกิจประกอบ
+    final_content = get_economy_with_ai(real_stock_data)
     
-    send_line_push(header + content + footer)
+    # 3. ส่งผลลัพธ์
+    header = f"📊 สรุปเศรษฐกิจ & หุ้นโลก (Hybrid Real-Time)\n📅 ข้อมูล ณ {datetime.now().strftime('%d/%m/%Y')}\n{'-'*20}\n"
+    footer = f"\n{'-'*20}\n✅ หุ้น: Real-time Data (Yahoo Finance)\n🤖 ศก.: AI Google Search"
+    
+    send_line_push(header + final_content + footer)
     print("Done!")
