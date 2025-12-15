@@ -1,11 +1,11 @@
 import os
 import requests
 import json
+import time
 import yfinance as yf
 from duckduckgo_search import DDGS
 import google.generativeai as genai
 from datetime import datetime
-import time
 
 # 1. ตั้งค่า
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
@@ -14,7 +14,42 @@ LINE_USER_ID = os.environ["LINE_USER_ID"]
 
 genai.configure(api_key=GEMINI_API_KEY)
 
-# 2. ฟังก์ชันดึงหุ้น (Yahoo Finance)
+# 2. ฟังก์ชันเลือกโมเดล (นำระบบสแกนกลับมาใช้)
+def select_best_model():
+    print("🔍 Scanning available models...")
+    try:
+        available_models = []
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                available_models.append(m.name)
+        
+        if not available_models:
+            return None, "No models found."
+
+        # ลำดับความสำคัญ: Flash -> Pro -> อะไรก็ได้ที่มี
+        preferred_order = [
+            'models/gemini-1.5-flash',
+            'models/gemini-1.5-flash-latest',
+            'models/gemini-1.5-flash-001',
+            'models/gemini-1.5-pro',
+            'models/gemini-1.5-pro-latest',
+            'models/gemini-pro'
+        ]
+        
+        for p in preferred_order:
+            if p in available_models:
+                print(f"✅ Selected Model: {p}")
+                return p, None
+        
+        # ถ้าไม่เจอตัวที่ชอบ เอาตัวแรกที่มีเลย
+        fallback = available_models[0]
+        print(f"✅ Selected Fallback: {fallback}")
+        return fallback, None
+
+    except Exception as e:
+        return None, str(e)
+
+# 3. ฟังก์ชันดึงหุ้น (Yahoo Finance)
 def get_stock_data():
     print("📈 Fetching Stocks...")
     tickers = {
@@ -28,34 +63,31 @@ def get_stock_data():
         "🇹🇭 SET": "^SET.BK"
     }
     
-    report = "📊 REAL-TIME STOCK DATA:\n"
+    report = "📊 REAL-TIME STOCK DATA (YTD):\n"
+    current_year = datetime.now().year
+    
     for name, symbol in tickers.items():
         try:
             ticker = yf.Ticker(symbol)
-            # พยายามดึงข้อมูลล่าสุด
-            hist = ticker.history(period="5d") # เอา 5 วันย้อนหลังเผื่อติดวันหยุด
+            # ดึงข้อมูลตั้งแต่ต้นปี
+            hist = ticker.history(start=f"{current_year}-01-01")
+            
             if not hist.empty:
-                last_price = hist['Close'].iloc[-1]
+                start_price = hist.iloc[0]['Close']
+                current_price = hist.iloc[-1]['Close']
+                change_pct = ((current_price - start_price) / start_price) * 100
                 
-                # หา % YTD แบบคร่าวๆ (เทียบกับวันแรกของปีในข้อมูล 5 วันอาจไม่ได้ ต้องเทียบกับ prev close)
-                # เพื่อความแม่นยำเรื่อง YTD เราจะดึงข้อมูล ytd จริงๆ
-                ytd_hist = ticker.history(period="ytd")
-                if not ytd_hist.empty:
-                    start_price = ytd_hist['Close'].iloc[0]
-                    change = ((last_price - start_price) / start_price) * 100
-                    sign = "+" if change >= 0 else ""
-                    report += f"{name}: {sign}{change:.2f}% (Price: {last_price:,.0f})\n"
-                else:
-                    report += f"{name}: N/A\n"
+                sign = "+" if change_pct >= 0 else ""
+                report += f"{name}: {sign}{change_pct:.2f}%\n"
             else:
                 report += f"{name}: N/A\n"
         except:
             report += f"{name}: N/A\n"
     return report
 
-# 3. ฟังก์ชันค้นหาข่าวเศรษฐกิจ (DuckDuckGo)
+# 4. ฟังก์ชันค้นหาข่าวเศรษฐกิจ (DuckDuckGo)
 def search_economy_data():
-    print("🌍 Searching Economy News...")
+    print("🌍 Searching Economy News via DuckDuckGo...")
     countries = [
         "United States", "China", "Eurozone", "Japan", 
         "India", "South Korea", "Vietnam", "Thailand"
@@ -66,46 +98,48 @@ def search_economy_data():
     
     for country in countries:
         try:
-            # ค้นหาคำว่า "Latest GDP Inflation Interest Rate [Country] 2025"
-            query = f"latest GDP inflation interest rate {country} official data released 2024 2025 tradingeconomics"
-            results = ddgs.text(query, max_results=2) # เอา 2 ผลลัพธ์แรก
+            # ค้นหาคำว่า "Latest GDP Inflation Interest Rate [Country] released 2024 2025"
+            query = f"latest GDP growth inflation rate interest rate {country} official data released 2024 2025 tradingeconomics"
+            results = ddgs.text(query, max_results=2)
             
             search_results += f"\n--- {country} ---\n"
             if results:
                 for r in results:
                     search_results += f"- {r['body']}\n"
             else:
-                search_results += "No data found via Search.\n"
+                search_results += "No data found.\n"
             
-            time.sleep(1) # พักนิดนึงป้องกันโดนบล็อก
+            time.sleep(1) # พักนิดนึง
         except Exception as e:
-            search_results += f"{country}: Search Error ({str(e)})\n"
+            search_results += f"{country}: Search Error\n"
             
     return search_results
 
-# 4. ฟังก์ชัน AI (สรุปข้อมูล)
+# 5. ฟังก์ชัน AI (สรุปข้อมูล)
 def generate_summary(stock_text, news_text):
-    print("🤖 AI Summarizing...")
-    # ใช้รุ่น Flash ธรรมดา ไม่ต้องใช้ Tools แล้ว เพราะเราป้อนข้อมูลให้มันเอง
-    model = genai.GenerativeModel('models/gemini-1.5-flash')
+    # เลือกโมเดลก่อน (แก้ 404)
+    model_name, error = select_best_model()
+    if error: return f"System Error: {error}"
+
+    print(f"🤖 AI Summarizing using {model_name}...")
+    model = genai.GenerativeModel(model_name)
     
     current_date = datetime.now().strftime("%d %B %Y")
     
     prompt = f"""
     Current Date: {current_date}
     
-    INPUT DATA 1 (Stocks - Real):
+    INPUT DATA 1 (Stocks - Real YTD):
     {stock_text}
     
-    INPUT DATA 2 (Economy - Search Results):
+    INPUT DATA 2 (Economy - Search Snippets):
     {news_text}
     
     TASK:
-    Act as a professional economist. Use the PROVIDED INPUT DATA to create a summary.
-    Do not invent numbers. If the search results don't have the specific number, write "-".
+    Act as a professional economist. Summarize the OFFICIAL data from the Inputs.
     
     OUTPUT FORMAT (THAI Language):
-    [Flag] [Country Name]
+    [Flag] [Country Name in Thai]
     • GDP: [Prev]% ➡ [Actual]%
     • CPI: [Prev]% ➡ [Actual]%
     • Rate: [Actual]%
@@ -113,10 +147,12 @@ def generate_summary(stock_text, news_text):
     • YTD Stock: [Return from Input 1]%
     
     Rules:
-    - PMI Emoji: 🟢(>50), 🔴(<50)
-    - "Actual" must be from the Search Results provided.
+    - Extract "Actual" numbers from the Search Snippets.
+    - If "Prev" (Previous) is found in snippet, show it. If not, just show Actual.
+    - If specific data is missing in snippet, use "-". DO NOT GUESS.
     - Rate = Central Bank Policy Rate.
-    - Analyst View: 2 sentences at the bottom.
+    - PMI Emoji: 🟢(>50), 🔴(<50), ⚪(=50)
+    - Analyst View: 2 sentences at the bottom (Based on the data).
     """
     
     try:
@@ -125,7 +161,7 @@ def generate_summary(stock_text, news_text):
     except Exception as e:
         return f"AI Error: {str(e)}"
 
-# 5. ส่งไลน์
+# 6. ส่งไลน์
 def send_line_push(message):
     url = 'https://api.line.me/v2/bot/message/push'
     headers = {
@@ -150,7 +186,7 @@ if __name__ == "__main__":
     final_content = generate_summary(stocks, news)
     
     # 4. ส่งผลลัพธ์
-    header = f"📊 สรุปเศรษฐกิจโลก (DDG Search)\n📅 ข้อมูล ณ {datetime.now().strftime('%d/%m/%Y')}\n{'-'*20}\n"
+    header = f"📊 สรุปเศรษฐกิจโลก (Real-Time)\n📅 ข้อมูล ณ {datetime.now().strftime('%d/%m/%Y')}\n{'-'*20}\n"
     footer = f"\n{'-'*20}\n✅ Data Source: Yahoo Finance & DuckDuckGo"
     
     send_line_push(header + final_content + footer)
