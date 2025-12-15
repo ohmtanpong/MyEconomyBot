@@ -20,7 +20,7 @@ jobs:
 
       - name: Install libraries
         run: |
-          pip install requests google-generativeai yfinance
+          pip install requests google-generativeai yfinance duckduckgo-search
 
       - name: Run script
         env:
