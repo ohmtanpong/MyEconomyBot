@@ -11,7 +11,7 @@ LINE_USER_ID = os.environ["LINE_USER_ID"]
 
 genai.configure(api_key=GEMINI_API_KEY)
 
-# 2. ฟังก์ชันส่งไลน์ (ส่งทีเดียว ข้อความเดียว)
+# 2. ฟังก์ชันส่งไลน์
 def send_line_push(message):
     url = 'https://api.line.me/v2/bot/message/push'
     headers = {
@@ -20,27 +20,25 @@ def send_line_push(message):
     }
     data = {
         'to': LINE_USER_ID,
-        'messages': [{'type': 'text', 'text': message}] # ส่งเป็นก้อนเดียว
+        'messages': [{'type': 'text', 'text': message}]
     }
     try:
-        response = requests.post(url, headers=headers, data=json.dumps(data))
-        print(f"LINE Response: {response.status_code}")
+        requests.post(url, headers=headers, data=json.dumps(data))
     except Exception as e:
-        print(f"Error sending LINE: {e}")
+        print(f"Line Error: {e}")
 
-# 3. ระบบค้นหาโมเดลอัตโนมัติ (แก้ปัญหา 404)
+# 3. ค้นหาโมเดล
 def select_best_model():
-    print("🔍 Auto-detecting available models...")
+    print("🔍 Auto-detecting models...")
     try:
-        available_models = []
+        available = []
         for m in genai.list_models():
             if 'generateContent' in m.supported_generation_methods:
-                available_models.append(m.name)
+                available.append(m.name)
         
-        if not available_models:
-            return None, "No models found."
+        if not available: return None, "No models found."
 
-        # ลำดับความสำคัญ: Flash -> Pro -> อะไรก็ได้
+        # ลำดับการเลือก: Flash -> Pro
         preferred = [
             'models/gemini-1.5-flash',
             'models/gemini-1.5-flash-latest',
@@ -48,68 +46,66 @@ def select_best_model():
             'models/gemini-pro'
         ]
         
-        # เลือกตัวที่ดีที่สุดที่มีในบัญชี
         for p in preferred:
-            if p in available_models:
-                print(f"✅ Selected: {p}")
+            if p in available:
+                print(f"✅ Selected Model: {p}") # บรรทัดนี้จะบอกชื่อโมเดลใน Log
                 return p, None
         
-        # ถ้าไม่เจอตัวที่ชอบ เอาตัวแรกที่มีเลย
-        print(f"✅ Selected (Fallback): {available_models[0]}")
-        return available_models[0], None
+        return available[0], None
 
     except Exception as e:
         return None, str(e)
 
-# 4. สั่งงาน Gemini
+# 4. สั่งงาน Gemini (แก้ Prompt ใหม่)
 def get_economy_data():
     model_name, error = select_best_model()
-    if error:
-        return f"❌ System Error: {error}"
+    if error: return f"System Error: {error}"
 
     model = genai.GenerativeModel(model_name)
-    current_date = datetime.now().strftime("%B %Y")
+    current_date = datetime.now().strftime("%d %B %Y")
     
+    # --- PROMPT แก้ไขใหม่ ---
     prompt = f"""
-    Task: Summarize LATEST OFFICIAL economic data for {current_date}.
-    Countries: 🇺🇸US, 🇨🇳China, 🇪🇺EU, 🇯🇵Japan, 🇮🇳India, 🇰🇷Korea, 🇻🇳Vietnam, 🇹🇭Thailand.
+    Role: Senior Economist.
+    Current Date: {current_date}
     
-    Output Format:
-    Create a single consolidated list in THAI language.
-    For each country, show these 5 lines (Compact style):
-    [Flag] [Country Name]
-    • GDP: [Prev]% ➡ [Actual]% (Est [Fcst]%)
-    • CPI: [Prev]% ➡ [Actual]% (Est [Fcst]%)
-    • Rate: [Prev]% ➡ [Actual]% (Est [Fcst]%)
-    • PMI: [Prev] ➡ [Actual] [Status_Emoji]
-    • Stock YTD: [Index] [Return]%
+    Task: Retrieve the MOST RECENTLY RELEASED official economic indicators available as of TODAY.
+    Countries: 🇺🇸US, 🇨🇳China, 🇪🇺Eurozone, 🇯🇵Japan, 🇮🇳India, 🇰🇷Korea, 🇻🇳Vietnam, 🇹🇭Thailand.
     
-    Status Emoji for PMI: 🟢(>50), 🔴(<50), ⚪(=50)
+    Format Definitions:
+    - [Prev]: The data from the period BEFORE the latest release.
+    - [Actual]: The LATEST OFFICIAL RELEASED number (e.g., if today is Dec, CPI might be Nov data).
+    - [Est]: The Consensus Forecast for the next release (if available, else "-").
     
-    Rules:
-    1. Compare 3 points: Previous -> Actual (Forecast). If Forecast is missing, use "-".
-    2. Use OFFICIAL data only.
-    3. Keep it strictly compact.
-    4. Analyst View: At the bottom, add 2 sentences on the best market to invest in.
+    Required Output Format (Single consolidated message in THAI):
+    [Flag] [Country Name in Thai]
+    • GDP: [Prev]% ➡ [Actual]% (Est [Est]%)
+    • CPI: [Prev]% ➡ [Actual]% (Est [Est]%)
+    • Rate: [Prev]% ➡ [Actual]% (Est [Est]%)
+    • PMI: [Prev] ➡ [Actual] [Emoji]
+    • Stock YTD: [Index Name] [Return]%
+    
+    PMI Emoji: 🟢(>50), 🔴(<50), ⚪(=50)
+    
+    Strict Rules:
+    1. Do NOT say "data not available for current month". Always provide the LATEST AVAILABLE data from previous months/quarters.
+    2. Only use OFFICIAL numbers.
+    3. Add "💡 Analyst View" at the bottom (2 sentences summary).
     """
     
     try:
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"❌ Generate Error: {str(e)}"
+        return f"Generate Error: {str(e)}"
 
 # 5. เริ่มทำงาน
 if __name__ == "__main__":
-    print("Generating content...")
+    print("Process Started...")
     content = get_economy_data()
     
-    # รวมทุกส่วนเป็น String เดียว (ข้อความเดียว)
-    header = f"📊 สรุปเศรษฐกิจโลก (3-Point Data)\n📅 ประจำเดือน {datetime.now().strftime('%m/%Y')}\n{'-'*20}\n"
-    footer = f"\n{'-'*20}\n⚠️ AI Generated: โปรดตรวจสอบก่อนลงทุน"
+    header = f"📊 สรุปเศรษฐกิจโลก (ล่าสุด)\n📅 ข้อมูล ณ {datetime.now().strftime('%d/%m/%Y')}\n{'-'*20}\n"
+    footer = f"\n{'-'*20}\n⚠️ AI Generated: เช็คข้อมูลทางการอีกครั้ง"
     
-    full_message = header + content + footer
-    
-    print("Sending single message to LINE...")
-    send_line_push(full_message)
+    send_line_push(header + content + footer)
     print("Done!")
