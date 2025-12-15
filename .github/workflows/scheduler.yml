@@ -1,0 +1,30 @@
+name: Monthly Economy Update
+
+on:
+  schedule:
+    # ตั้งเวลา: นาทีที่ 0, ชั่วโมงที่ 2 (UTC = 9 โมงเช้าไทย), วันที่ 1 ของทุกเดือน
+    - cron: '0 2 1 * *' 
+  workflow_dispatch: # เพื่อให้กดรันด้วยมือทดสอบได้
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install libraries
+        run: |
+          pip install requests google-generativeai
+
+      - name: Run script
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+        run: python main.py
