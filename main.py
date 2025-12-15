@@ -11,6 +11,7 @@ LINE_USER_ID = os.environ["LINE_USER_ID"]
 
 genai.configure(api_key=GEMINI_API_KEY)
 
+# 2. ฟังก์ชันส่งไลน์
 def send_line_push(message):
     url = 'https://api.line.me/v2/bot/message/push'
     headers = {
@@ -21,71 +22,88 @@ def send_line_push(message):
         'to': LINE_USER_ID,
         'messages': [{'type': 'text', 'text': message}]
     }
-    requests.post(url, headers=headers, data=json.dumps(data))
-
-def get_economy_summary():
-    current_date = datetime.now().strftime("%B %Y")
-    
-    # --- ส่วนสำคัญ: ระบบค้นหาโมเดลอัตโนมัติ (Auto-Detect) ---
-    print("🔍 กำลังค้นหาโมเดลที่ใช้งานได้...")
-    valid_model = None
-    
     try:
-        # สั่งให้ Google List รายชื่อโมเดลทั้งหมดออกมา
-        for m in genai.list_models():
-            # หาโมเดลที่สามารถ Generate Content ได้ (ตัดพวกโมเดลฝังตัวออก)
-            if 'generateContent' in m.supported_generation_methods:
-                print(f"✅ เจอโมเดล: {m.name}")
-                # เลือกตัวที่เป็นรุ่น 1.5 หรือ Pro หรือ Flash ก่อน
-                if 'flash' in m.name or 'pro' in m.name:
-                    valid_model = m.name
-                    break # เจอแล้วหยุดหาเลย เอาตัวนี้แหละ
-        
-        # ถ้าหา Flash/Pro ไม่เจอเลย ให้เอาตัวแรกสุดที่เจอ
-        if not valid_model:
-             for m in genai.list_models():
-                if 'generateContent' in m.supported_generation_methods:
-                    valid_model = m.name
-                    break
-                    
+        response = requests.post(url, headers=headers, data=json.dumps(data))
+        if response.status_code != 200:
+            print(f"LINE Error: {response.status_code} {response.text}")
     except Exception as e:
-        return f"❌ API Key มีปัญหาครับ: {str(e)}\n(ลองเช็คใน GitHub Secrets ว่ามีช่องว่างติดมาไหม)"
+        print(f"Error sending LINE: {e}")
 
-    if not valid_model:
-        return "❌ เชื่อมต่อได้ แต่ไม่พบโมเดลที่ใช้งานได้เลย (แปลกมาก)"
+# 3. สั่งงาน Gemini
+def get_economy_summary():
+    # ระบบ Auto-Detect เลือกโมเดลที่ฉลาดที่สุดก่อน
+    valid_model = None
+    try:
+        # ลองหา Pro หรือ Flash 1.5 ก่อน
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                if 'gemini-1.5-pro' in m.name:
+                    valid_model = m.name; break
+        # ถ้าไม่มี เอา Flash
+        if not valid_model:
+            for m in genai.list_models():
+                if 'generateContent' in m.supported_generation_methods:
+                    if 'gemini-1.5-flash' in m.name:
+                        valid_model = m.name; break
+        # ถ้าไม่มีจริงๆ เอาอะไรก็ได้
+        if not valid_model:
+            valid_model = 'gemini-pro'
+    except:
+        valid_model = 'gemini-pro'
 
-    print(f"🚀 ตกลงใช้โมเดล: {valid_model}")
-    
-    # --- เริ่มสร้างเนื้อหา ---
+    print(f"Using Model: {valid_model}")
     model = genai.GenerativeModel(valid_model)
     
+    current_date = datetime.now().strftime("%B %Y")
+    
+    # --- Prompt ที่ปรับปรุงใหม่ (Strict Data & Formatting) ---
     prompt = f"""
-    สรุปเศรษฐกิจโลกเดือน {current_date}
-    ประเทศ: 🇺🇸US, 🇨🇳China, 🇪🇺EU, 🇯🇵Japan, 🇮🇳India, 🇰🇷Korea, 🇻🇳Vietnam, 🇹🇭Thailand
+    Act as a professional economist. Summarize the LATEST OFFICIAL economic indicators for:
+    🇺🇸USA, 🇨🇳China, 🇪🇺Eurozone, 🇯🇵Japan, 🇮🇳India, 🇰🇷South Korea, 🇻🇳Vietnam, 🇹🇭Thailand.
     
-    ข้อมูล 6 ตัวชี้วัด (ล่าสุด):
-    1. GDP Growth
-    2. Inflation Rate
-    3. Unemployment
-    4. Interest Rate
-    5. PMI
-    6. **Stock Market YTD Return** (ระบุชื่อดัชนี)
+    Current Date: {current_date}
     
-    รูปแบบ: ภาษาไทย สั้นกระชับ แยกรายประเทศ (Emoji ธงชาติ)
-    ปิดท้ายด้วย "💡 มุมมองการลงทุน"
+    Please present the data in this EXACT format for each country:
+    
+    [Flag Emoji] [Country Name]
+    • GDP: [Prev]% ➡ [Current]% (Est [Forecast]%)
+    • CPI: [Prev]% ➡ [Current]% (Est [Forecast]%)
+    • Rate: [Prev]% ➡ [Current]% (Est [Forecast]%)
+    • PMI: [Prev] ➡ [Current] ([Status Emoji])
+    • YTD Stock: [Index Name] [+/-Return]%
+    
+    Indicators Key:
+    - GDP: GDP Growth Rate (YoY)
+    - CPI: Inflation Rate (YoY)
+    - Rate: Central Bank Interest Rate
+    - PMI: Manufacturing PMI (Use 🟢 for >50, 🔴 for <50, ⚪ for 50)
+    - YTD Stock: Year-to-Date return of the main index.
+    
+    Rules:
+    1. Only use OFFICIAL announced numbers. If "Forecast" is unavailable, use "-".
+    2. Comparison: Show Previous vs Current to see the trend.
+    3. Keep it clean and readable for a chat app (LINE).
+    4. **Translate everything into THAI Language.**
+    5. Add a "💡 Analyst View" at the very end (1-2 sentences on who looks strongest).
     """
     
     try:
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"❌ โมเดล {valid_model} Error: {str(e)}"
+        return f"เกิดข้อผิดพลาดในการดึงข้อมูล: {str(e)}"
 
-# เริ่มทำงาน
+# 4. เริ่มทำงาน
 if __name__ == "__main__":
-    print("Starting...")
+    print("Generating...")
     summary = get_economy_summary()
     
-    header = f"📊 สรุปเศรษฐกิจ (Auto-Detect)\n📅 {datetime.now().strftime('%m/%Y')}\n{'-'*15}\n"
-    send_line_push(header + summary)
+    # ส่วนหัวข้อความ
+    header = f"📊 สรุปตัวเลขเศรษฐกิจ (3-Point Data)\n📅 ข้อมูลล่าสุด ณ {datetime.now().strftime('%m/%Y')}\n{'-'*25}\n"
+    
+    # ส่วน Disclaimer (สำคัญมาก เพื่อเตือนเรื่องความแม่นยำ)
+    footer = f"\n{'-'*25}\n⚠️ หมายเหตุ: ข้อมูลสังเคราะห์โดย AI โปรดตรวจสอบแหล่งข้อมูลทางการ (Investing/Bloomberg) อีกครั้งก่อนตัดสินใจลงทุน"
+    
+    # ส่งเข้า LINE
+    send_line_push(header + summary + footer)
     print("Done!")
